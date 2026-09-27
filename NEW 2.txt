@@ -1,0 +1,2069 @@
+---
+name: netlify-forms-tanstack
+description: Handle Netlify Forms in TanStack Start. Use when implementing contact forms, signup forms, or any form submission handling on Netlify-hosted TanStack Start sites.
+license: Apache-2.0
+metadata:
+  author: netlify
+  version: "1.0"
+---
+
+# Netlify Forms — TanStack Start Addendum
+
+> **Base skill**: General Netlify Forms usage (HTML setup, spam filtering, honeypot fields, notifications) is covered by the `netlify-forms` skill in the agent-runner base skills. This skill covers **only** the TanStack Start-specific requirement on top of that.
+
+---
+
+## The Problem: Netlify Can't Detect React-Rendered Forms
+
+TanStack Start renders pages via React on the client side. Netlify's build-time form detection works by scanning the **static HTML output** of your build. Because TanStack Start's forms live inside React components, Netlify never sees them during the build — so the form is never registered and submissions will silently fail. Without build-time detection, POSTs containing form data pass through to the SSR function instead of being intercepted by Netlify's form processing.
+
+---
+
+## The Solution: Dummy Static Form in `./public/`
+
+Place a minimal static HTML file in `./public/` containing a hidden form that mirrors your React form's fields. Netlify scans `public/` at build time, registers the form name, and starts accepting submissions to it.
+
+### `public/contact-form.html`
+
+```html
+<!DOCTYPE html>
+<html>
+  <body>
+    <!-- This file exists only so Netlify registers the form at build time. -->
+    <!-- It is never shown to users. -->
+    <form name="contact" netlify netlify-honeypot="bot-field" hidden>
+      <input type="text" name="name" />
+      <input type="email" name="email" />
+      <textarea name="message"></textarea>
+    </form>
+  </body>
+</html>
+```
+
+**Rules:**
+- `name="contact"` must exactly match the `name` attribute in your React component's fetch call.
+- Include every field your React form submits — Netlify validates field names against the registered form.
+- Add `netlify-honeypot="bot-field"` here if your React form uses a honeypot field.
+
+---
+
+## The React Component
+
+Submit via AJAX using `fetch` with `application/x-www-form-urlencoded` encoding. Do **not** use a plain `<form action="/">` — that causes a full-page reload and breaks TanStack Router's client-side navigation.
+
+```tsx
+import { useState } from 'react'
+
+function encode(data: Record<string, string>) {
+  return Object.entries(data)
+    .map(([key, val]) => `${encodeURIComponent(key)}=${encodeURIComponent(val)}`)
+    .join('&')
+}
+
+export function ContactForm() {
+  const [fields, setFields] = useState({ name: '', email: '', message: '' })
+  const [submitted, setSubmitted] = useState(false)
+
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => setFields({ ...fields, [e.target.name]: e.target.value })
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    await fetch('/contact-form.html', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: encode({ 'form-name': 'contact', ...fields }),
+    })
+    setSubmitted(true)
+  }
+
+  if (submitted) return <p>Thanks! We'll be in touch.</p>
+
+  return (
+    <form onSubmit={handleSubmit}>
+      {/* Required hidden field — tells Netlify which registered form this maps to */}
+      <input type="hidden" name="form-name" value="contact" />
+
+      <label>
+        Name
+        <input type="text" name="name" value={fields.name} onChange={handleChange} required />
+      </label>
+      <label>
+        Email
+        <input type="email" name="email" value={fields.email} onChange={handleChange} required />
+      </label>
+      <label>
+        Message
+        <textarea name="message" value={fields.message} onChange={handleChange} required />
+      </label>
+      <button type="submit">Send</button>
+    </form>
+  )
+}
+```
+
+**Key points:**
+- The hidden `<input name="form-name" value="contact" />` is mandatory — it tells Netlify which form to associate the submission with.
+- `e.preventDefault()` prevents full-page navigation.
+- The `fetch` body uses URL-encoded encoding, not JSON — Netlify Forms requires this format.
+
+> **SSR interception warning:** In TanStack Start (and other SSR frameworks), `fetch('/')` will be intercepted by the SSR catch-all function and never reach Netlify's form processing middleware. The `fetch` URL **must** point to the static skeleton file path (e.g. `/contact-form.html`), not `/`. This ensures the request routes through the CDN origin where Netlify's `formsHandler` can process it.
+
+---
+
+## Checklist
+
+- [ ] **Static HTML skeleton exists** in `public/` (e.g. `public/__forms.html`) with `data-netlify="true"` and all field names — this is the most critical step
+- [ ] Form `name` in the static HTML exactly matches `form-name` value in the React component
+- [ ] Every field in the React form is also in the static HTML skeleton
+- [ ] React component has `<input type="hidden" name="form-name" value="..." />`
+- [ ] `fetch` posts to the static skeleton file path (NOT `/`) with `Content-Type: application/x-www-form-urlencoded`
+- [ ] Deployed to Netlify (forms don't work in local dev — test on a deploy preview)
+
+.claude/skills/tanstack-start-api-routes/SKILL.md
+added
++421
+---
+name: tanstack-start-api-routes
+description: Create API routes (server routes) in TanStack Start for handling HTTP requests. Use when building REST APIs, webhooks, or any HTTP endpoint that returns data rather than rendering a page.
+license: Apache-2.0
+metadata:
+  author: tanstack
+  version: "1.0"
+---
+
+# TanStack Start API Routes (Server Routes)
+
+TanStack Start allows you to create API endpoints using the `server` property on routes. These run server-side and handle raw HTTP requests.
+
+## When to Use
+
+- Building REST API endpoints
+- Handling webhooks
+- File uploads/downloads
+- Any endpoint that returns data (not HTML)
+
+**Note**: For RPC-style server logic callable from components, use **server functions** instead. Server routes are for traditional HTTP endpoints.
+
+## Basic Server Route
+
+```typescript
+// src/routes/api/hello.ts
+import { createFileRoute } from '@tanstack/react-router';
+
+export const Route = createFileRoute('/api/hello')({
+  server: {
+    handlers: {
+      GET: async ({ request }) => {
+        return new Response(JSON.stringify({ message: 'Hello, World!' }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    },
+  },
+});
+```
+
+## Multiple HTTP Methods
+
+```typescript
+// src/routes/api/users.ts
+import { createFileRoute } from '@tanstack/react-router';
+
+export const Route = createFileRoute('/api/users')({
+  server: {
+    handlers: {
+      GET: async ({ request }) => {
+        const users = await fetchUsers();
+        return Response.json(users);
+      },
+      
+      POST: async ({ request }) => {
+        const body = await request.json();
+        const newUser = await createUser(body);
+        return Response.json(newUser, { status: 201 });
+      },
+    },
+  },
+});
+```
+
+## Dynamic Parameters
+
+```typescript
+// src/routes/api/users/$id.ts
+import { createFileRoute } from '@tanstack/react-router';
+
+export const Route = createFileRoute('/api/users/$id')({
+  server: {
+    handlers: {
+      GET: async ({ params }) => {
+        const { id } = params;
+        const user = await getUser(id);
+        
+        if (!user) {
+          return new Response('User not found', { status: 404 });
+        }
+        
+        return Response.json(user);
+      },
+      
+      PUT: async ({ request, params }) => {
+        const { id } = params;
+        const body = await request.json();
+        const updatedUser = await updateUser(id, body);
+        return Response.json(updatedUser);
+      },
+      
+      DELETE: async ({ params }) => {
+        const { id } = params;
+        await deleteUser(id);
+        return new Response(null, { status: 204 });
+      },
+    },
+  },
+});
+```
+
+## Multiple Dynamic Parameters
+
+```typescript
+// src/routes/api/users/$userId/posts/$postId.ts
+import { createFileRoute } from '@tanstack/react-router';
+
+export const Route = createFileRoute('/api/users/$userId/posts/$postId')({
+  server: {
+    handlers: {
+      GET: async ({ params }) => {
+        const { userId, postId } = params;
+        const post = await getUserPost(userId, postId);
+        return Response.json(post);
+      },
+    },
+  },
+});
+```
+
+## Handler Context
+
+The handler receives a context object with:
+
+```typescript
+export const Route = createFileRoute('/api/example')({
+  server: {
+    handlers: {
+      GET: async (context) => {
+        // Request object (Web API Request)
+        const { request } = context;
+        
+        // URL parameters from route
+        const { params } = context;
+        
+        // Get headers
+        const authHeader = request.headers.get('Authorization');
+        
+        // Get query parameters
+        const url = new URL(request.url);
+        const searchParams = url.searchParams;
+        const page = searchParams.get('page');
+        
+        return Response.json({ page });
+      },
+    },
+  },
+});
+```
+
+## Request Body Handling
+
+### JSON Body
+
+```typescript
+POST: async ({ request }) => {
+  const body = await request.json();
+  // body is parsed JSON
+  return Response.json({ received: body });
+},
+```
+
+### Form Data
+
+```typescript
+POST: async ({ request }) => {
+  const formData = await request.formData();
+  const name = formData.get('name');
+  const email = formData.get('email');
+  
+  return Response.json({ name, email });
+},
+```
+
+### Raw Text/Binary
+
+```typescript
+POST: async ({ request }) => {
+  const text = await request.text();
+  // or
+  const buffer = await request.arrayBuffer();
+  
+  return new Response('Received', { status: 200 });
+},
+```
+
+## Response Helpers
+
+```typescript
+// JSON response
+return Response.json({ data: 'value' });
+
+// JSON with status
+return Response.json({ error: 'Not found' }, { status: 404 });
+
+// Plain text
+return new Response('Hello', {
+  headers: { 'Content-Type': 'text/plain' },
+});
+
+// HTML
+return new Response('<h1>Hello</h1>', {
+  headers: { 'Content-Type': 'text/html' },
+});
+
+// Redirect
+return Response.redirect('https://example.com', 302);
+
+// No content
+return new Response(null, { status: 204 });
+
+// Stream
+const stream = new ReadableStream({ ... });
+return new Response(stream, {
+  headers: { 'Content-Type': 'application/octet-stream' },
+});
+```
+
+## Error Handling
+
+```typescript
+export const Route = createFileRoute('/api/users/$id')({
+  server: {
+    handlers: {
+      GET: async ({ params }) => {
+        try {
+          const user = await getUser(params.id);
+          
+          if (!user) {
+            return Response.json(
+              { error: 'User not found' },
+              { status: 404 }
+            );
+          }
+          
+          return Response.json(user);
+        } catch (error) {
+          console.error('Error fetching user:', error);
+          
+          return Response.json(
+            { error: 'Internal server error' },
+            { status: 500 }
+          );
+        }
+      },
+    },
+  },
+});
+```
+
+## Authentication
+
+```typescript
+// src/routes/api/protected.ts
+import { createFileRoute } from '@tanstack/react-router';
+import { verifyToken } from '../lib/auth';
+
+export const Route = createFileRoute('/api/protected')({
+  server: {
+    handlers: {
+      GET: async ({ request }) => {
+        const authHeader = request.headers.get('Authorization');
+        
+        if (!authHeader?.startsWith('Bearer ')) {
+          return Response.json(
+            { error: 'Missing authorization header' },
+            { status: 401 }
+          );
+        }
+        
+        const token = authHeader.slice(7);
+        const user = await verifyToken(token);
+        
+        if (!user) {
+          return Response.json(
+            { error: 'Invalid token' },
+            { status: 401 }
+          );
+        }
+        
+        // Proceed with authenticated request
+        return Response.json({ user, message: 'Protected data' });
+      },
+    },
+  },
+});
+```
+
+## CORS Headers
+
+```typescript
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+export const Route = createFileRoute('/api/data')({
+  server: {
+    handlers: {
+      // Handle preflight
+      OPTIONS: async () => {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders,
+        });
+      },
+      
+      GET: async ({ request }) => {
+        const data = await fetchData();
+        
+        return Response.json(data, {
+          headers: corsHeaders,
+        });
+      },
+    },
+  },
+});
+```
+
+## File Naming Conventions
+
+| File Path | API Route |
+|-----------|-----------|
+| `routes/api/hello.ts` | `GET /api/hello` |
+| `routes/api/users.ts` | `GET /api/users` |
+| `routes/api/users/$id.ts` | `GET /api/users/:id` |
+| `routes/api/users.index.ts` | `GET /api/users` |
+| `routes/api/file/$.ts` | `GET /api/file/*` (catch-all) |
+
+## Combined Route + API
+
+A single file can handle both page rendering and API:
+
+```typescript
+// src/routes/posts.$postId.tsx
+import { createFileRoute } from '@tanstack/react-router';
+
+export const Route = createFileRoute('/posts/$postId')({
+  // Server route handlers (API)
+  server: {
+    handlers: {
+      // GET /posts/123 with Accept: application/json → JSON response
+      GET: async ({ request, params }) => {
+        const accept = request.headers.get('Accept');
+        
+        if (accept?.includes('application/json')) {
+          const post = await getPost(params.postId);
+          return Response.json(post);
+        }
+        
+        // Fall through to page rendering
+        return undefined;
+      },
+    },
+  },
+  
+  // Page loader and component
+  loader: async ({ params }) => {
+    const post = await getPost(params.postId);
+    return { post };
+  },
+  
+  component: PostComponent,
+});
+```
+
+## Webhooks Example
+
+```typescript
+// src/routes/api/webhooks/stripe.ts
+import { createFileRoute } from '@tanstack/react-router';
+import Stripe from 'stripe';
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+export const Route = createFileRoute('/api/webhooks/stripe')({
+  server: {
+    handlers: {
+      POST: async ({ request }) => {
+        const sig = request.headers.get('stripe-signature');
+        const body = await request.text();
+        
+        let event: Stripe.Event;
+        
+        try {
+          event = stripe.webhooks.constructEvent(
+            body,
+            sig!,
+            process.env.STRIPE_WEBHOOK_SECRET!
+          );
+        } catch (err) {
+          return Response.json(
+            { error: 'Invalid signature' },
+            { status: 400 }
+          );
+        }
+        
+        switch (event.type) {
+          case 'checkout.session.completed':
+            await handleCheckoutComplete(event.data.object);
+            break;
+          // Handle other events...
+        }
+        
+        return Response.json({ received: true });
+      },
+    },
+  },
+});
+```
+
+## Best Practices
+
+1. **Use server functions for RPC** - If calling from components, prefer `createServerFn`
+2. **Validate input** - Always validate request bodies and parameters
+3. **Handle errors** - Return appropriate status codes and messages
+4. **Set correct headers** - Content-Type, CORS, caching as needed
+5. **Keep handlers focused** - One responsibility per endpoint
+6. **Use TypeScript** - Type your request/response bodies
+
+.claude/skills/tanstack-start-identity/SKILL.md
+added
++618
+Load change
+Large changes are not rendered by default.
+
+
+.claude/skills/tanstack-start-loaders/SKILL.md
+added
++426
+
+.claude/skills/tanstack-start-project-setup/SKILL.md
+added
++488
+
+.claude/skills/tanstack-start-routes/SKILL.md
+added
++430
+
+.claude/skills/tanstack-start-server-functions/SKILL.md
+added
++467
+
+.claude/skills/tanstack-start-typesafe-routing/SKILL.md
+added
++494
+
+.gitignore
+added
++8
+node_modules
+.DS_Store
+dist
+dist-ssr
+*.local
+.env
+.netlify
+.tanstack
+
+AGENTS.md
+added
++99
+# AGENTS.md
+
+This document orients AI agents and developers working on this codebase.
+
+## Project Overview
+
+The marketing site for **SJ Studio**, a jewelry CAD design and 3D modeling studio. Single-page
+site built with TanStack Start, presenting services, portfolio, workflow, and a design-brief
+contact form wired to Netlify Forms. No backend, database, or auth — everything on this page is
+static content plus one form submission endpoint.
+
+### Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Framework | TanStack Start (file-based routing) |
+| Frontend | React 19, TanStack Router v1 |
+| Build | Vite 7 |
+| Styling | Tailwind CSS 4 (CSS-first theme via `@theme` in `src/styles.css`) |
+| Forms | Netlify Forms (AJAX submission, static skeleton for build-time detection) |
+| Language | TypeScript 5.9 (strict mode) |
+| Deployment | Netlify |
+
+## Directory Structure
+
+```
+├── public
+│   ├── __forms.html        # Static skeleton so Netlify registers the "design-brief" form at build time
+│   ├── favicon.ico
+│   └── img/                # AI-generated jewelry photography (hero, portfolio, about)
+├── src
+│   ├── components
+│   │   ├── Header.tsx       # Fixed nav with mobile menu
+│   │   ├── Hero.tsx         # Hero section with trust badges
+│   │   ├── Services.tsx     # Services grid + shared SectionHead component
+│   │   ├── Portfolio.tsx    # CAD portfolio image grid
+│   │   ├── Workflow.tsx     # 4-step process
+│   │   ├── About.tsx        # Studio/founder bio
+│   │   ├── Testimonials.tsx
+│   │   ├── FAQ.tsx          # Accordion (CSS grid-template-rows transition)
+│   │   ├── ContactForm.tsx  # "design-brief" Netlify Form + WhatsApp fallback links
+│   │   └── Footer.tsx
+│   ├── data
+│   │   └── content.ts        # All site copy: brand info, services, portfolio, testimonials, FAQ
+│   ├── routes
+│   │   ├── __root.tsx        # Root layout: fonts, meta tags, grain overlay
+│   │   └── index.tsx         # Assembles all sections for `/`
+│   ├── router.tsx
+│   └── styles.css            # Tailwind v4 theme tokens (colors, fonts) + a few utility classes
+├── netlify.toml               # Build command, publish dir, dev server port
+├── tsconfig.json               # `@/*` alias → `src/*`
+└── vite.config.ts
+```
+
+## Key Concepts
+
+### Content is centralized
+
+Every piece of copy (brand name, WhatsApp number, services, portfolio captions, testimonials,
+FAQ) lives in `src/data/content.ts`. Update copy there rather than in components.
+
+### Netlify Forms requires the static skeleton
+
+`ContactForm.tsx` submits via `fetch('/__forms.html', ...)` — **not** `/` — because TanStack
+Start's SSR catch-all would otherwise intercept the POST before it reaches Netlify's form
+middleware. `public/__forms.html` must keep matching field names if the form in `ContactForm.tsx`
+changes. See the `netlify-forms` and `netlify-forms-tanstack` skills for details. Forms only work
+on a real Netlify deploy, not local `vite dev`.
+
+### Design system
+
+Colors, fonts, and a couple of custom utility classes (`.section-shell`, `.input`, `.font-display`,
+`.text-shimmer`) are defined once in `src/styles.css` via Tailwind v4's `@theme` block — this
+generates `bg-ink`, `text-gold`, `border-hairline`, etc. as ordinary Tailwind utilities. Keep new
+colors/fonts there instead of hardcoding hex values in components.
+
+### Images
+
+`public/img/*.png` were generated once via the Netlify AI Gateway (Gemini image model) and are
+static assets from here on — there is no runtime image-generation feature. All `<img>` tags
+reference them through `/.netlify/images?url=...&w=...&fm=webp` (Netlify Image CDN) rather than
+the raw files.
+
+## Conventions
+
+- Components: PascalCase, one per file in `src/components/`
+- Routes: TanStack Router file-based routing in `src/routes/`
+- Import paths use the `@/` alias for `src/*`
+- TypeScript strict mode; no unused locals/params
+
+## Development Commands
+
+```bash
+npm run dev      # Start dev server (vite dev --port 3000)
+npm run build    # Production build
+```
+
+Use `netlify dev --port 8889` to test the full Netlify runtime locally (image CDN, redirects).
+Netlify Forms submissions themselves only work once deployed.
+
+README.md
+added
++42
+# SJ Studio
+
+The marketing site for **SJ Studio**, a jewelry CAD design and 3D modeling studio offering
+production-ready ring, pendant, earring, and bracelet modeling in Rhino and MatrixGold, plus
+photoreal renders and turntable animations for jewelers and manufacturers.
+
+The page covers services, a CAD portfolio, the four-step production workflow, a studio bio,
+client testimonials, an FAQ, and a design-brief contact form that reaches the studio directly
+(with a WhatsApp fallback for anything urgent).
+
+## Tech Stack
+
+- **TanStack Start** (React 19 + TanStack Router) for file-based routing and SSR
+- **Vite 7** for the dev server and build
+- **Tailwind CSS 4** with a CSS-first theme (colors and fonts defined once in `src/styles.css`)
+- **Netlify Forms** for the design-brief submission, no custom backend
+- **Netlify Image CDN** to serve the studio's jewelry photography, resized and converted to WebP
+- Imagery generated once via the Netlify AI Gateway (Gemini image model) and committed as static
+  assets in `public/img/`
+
+## Running locally
+
+```bash
+npm install
+npm run dev
+```
+
+Visit `http://localhost:3000`. To test with the full Netlify runtime (image transforms, forms
+registration) instead, use the Netlify CLI:
+
+```bash
+netlify dev
+```
+
+Note: Netlify Forms submissions only succeed on a deployed site — local dev will not record a
+submission even though the form UI works.
+
+## Editing content
+
+All copy — brand details, WhatsApp number, service descriptions, portfolio captions,
+testimonials, and FAQ — lives in `src/data/content.ts`. Update it there; the components read
+from this single file.
+
+netlify.toml
+added
++7
+[build]
+  command = "vite build"
+  publish = "dist/client"
+[dev]
+  command = "npm run dev"
+  targetPort = 3000
+  port = 8888
+
+package.json
+added
++31
+{
+  "name": "sj-studio",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev --port 3000",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "4.2.2",
+    "@tanstack/react-router": "1.168.22",
+    "@tanstack/react-start": "1.167.41",
+    "@tanstack/router-plugin": "1.167.22",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tailwindcss": "4.2.2",
+    "vite-tsconfig-paths": "6.1.1"
+  },
+  "devDependencies": {
+    "@netlify/vite-plugin-tanstack-start": "1.3.19",
+    "@tailwindcss/vite": "4.2.2",
+    "@types/node": "22.20.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "5.2.0",
+    "rimraf": "6.1.3",
+    "tailwindcss": "4.2.2",
+    "typescript": "5.9.3",
+    "vite": "7.3.6"
+  }
+}
+
+pnpm-lock.yaml
+added
++7574
+Load change
+Large changes are not rendered by default.
+
+
+public/__forms.html
+added
++16
+<!DOCTYPE html>
+<html>
+  <body>
+    <!-- This file exists only so Netlify registers the form at build time. -->
+    <!-- It is never shown to users. -->
+    <form name="design-brief" data-netlify="true" netlify-honeypot="bot-field" hidden>
+      <input type="text" name="name" />
+      <input type="email" name="email" />
+      <input type="text" name="phone" />
+      <input type="text" name="category" />
+      <input type="text" name="metal" />
+      <textarea name="details"></textarea>
+      <input name="bot-field" />
+    </form>
+  </body>
+</html>
+
+public/favicon.ico
+added
+
+public/img/about-workspace.png
+added
+
+public/img/hero-ring.png
+added
+
+public/img/portfolio-bracelet.png
+added
+
+public/img/portfolio-earrings.png
+added
+
+public/img/portfolio-pendant.png
+added
+
+public/img/portfolio-ring.png
+added
+
+src/components/About.tsx
+added
++48
+import { brand } from '@/data/content'
+
+export function About() {
+  return (
+    <section id="about" className="section-shell">
+      <div className="grid grid-cols-1 items-center gap-14 md:grid-cols-2">
+        <div className="order-2 md:order-1">
+          <p className="text-xs tracking-[0.35em] text-gold">THE STUDIO</p>
+          <h2 className="mt-4 font-display text-3xl text-ivory md:text-4xl">
+            Built on the bench, not just the screen
+          </h2>
+          <p className="mt-6 text-sm leading-relaxed text-ivory-dim md:text-base">
+            {brand.name} is run by {brand.founder}, a jewelry CAD designer working out of{' '}
+            {brand.location} with nine years across Rhino and MatrixGold benches. Every file that
+            leaves the studio is checked the way a caster would check it — wall thickness, prong
+            clearance, stone tolerances — before it ever reaches a render.
+          </p>
+          <p className="mt-4 text-sm leading-relaxed text-ivory-dim md:text-base">
+            Clients range from independent designers sending a napkin sketch to manufacturers
+            running production queues across time zones. The process stays the same either way:
+            direct communication, no account managers in between.
+          </p>
+
+          <div className="mt-9 grid grid-cols-2 gap-6 border-t border-hairline/70 pt-7">
+            <div>
+              <div className="font-display text-2xl text-gold-bright">9 yrs</div>
+              <div className="mt-1 text-xs tracking-wide text-ivory-dim">Bench &amp; CAD experience</div>
+            </div>
+            <div>
+              <div className="font-display text-2xl text-gold-bright">Rhino · Matrix</div>
+              <div className="mt-1 text-xs tracking-wide text-ivory-dim">Primary CAD environments</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="order-1 md:order-2">
+          <div className="overflow-hidden rounded-2xl border border-hairline/60">
+            <img
+              src="/.netlify/images?url=/img/about-workspace.png&w=1000&fm=webp&q=80"
+              alt="Jewelry CAD design workspace"
+              className="aspect-[4/3] w-full object-cover"
+            />
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+src/components/ContactForm.tsx
+added
++216
+import { useState } from 'react'
+import { brand, whatsappLink } from '@/data/content'
+
+const initialFields = {
+  name: '',
+  email: '',
+  phone: '',
+  category: 'Ring Design',
+  metal: '14K Gold',
+  details: '',
+}
+
+function encode(data: Record<string, string>) {
+  return Object.entries(data)
+    .map(([key, val]) => `${encodeURIComponent(key)}=${encodeURIComponent(val)}`)
+    .join('&')
+}
+
+type Status = 'idle' | 'submitting' | 'success' | 'error'
+
+export function ContactForm() {
+  const [fields, setFields] = useState(initialFields)
+  const [status, setStatus] = useState<Status>('idle')
+
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
+  ) => setFields((f) => ({ ...f, [e.target.name]: e.target.value }))
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setStatus('submitting')
+    try {
+      const res = await fetch('/__forms.html', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: encode({ 'form-name': 'design-brief', ...fields }),
+      })
+      if (!res.ok) throw new Error('Request failed')
+      setStatus('success')
+      setFields(initialFields)
+    } catch {
+      setStatus('error')
+    }
+  }
+
+  return (
+    <section id="order" className="section-shell">
+      <div className="grid grid-cols-1 gap-14 rounded-3xl border border-hairline/60 bg-panel p-8 md:grid-cols-5 md:p-12">
+        <div className="md:col-span-2">
+          <p className="text-xs tracking-[0.35em] text-gold">GET STARTED</p>
+          <h2 className="mt-4 font-display text-3xl text-ivory md:text-4xl">Start Your CAD Project</h2>
+          <p className="mt-5 text-sm leading-relaxed text-ivory-dim">
+            Fill out the design brief or message directly on WhatsApp for a quote within hours.
+          </p>
+
+          <dl className="mt-9 space-y-6 border-t border-hairline/70 pt-7">
+            <div>
+              <dt className="text-xs tracking-[0.2em] text-gold">FILE DELIVERABLES</dt>
+              <dd className="mt-1 text-sm text-ivory-dim">3DM (Rhino/Matrix source) &amp; STL (print ready)</dd>
+            </div>
+            <div>
+              <dt className="text-xs tracking-[0.2em] text-gold">TURNAROUND TIME</dt>
+              <dd className="mt-1 text-sm text-ivory-dim">24 to 48 hours for standard projects</dd>
+            </div>
+            <div>
+              <dt className="text-xs tracking-[0.2em] text-gold">DIRECT WHATSAPP</dt>
+              <dd className="mt-1 text-sm text-ivory-dim">{brand.whatsappDisplay}</dd>
+            </div>
+          </dl>
+        </div>
+
+        <form
+          onSubmit={handleSubmit}
+          className="md:col-span-3"
+          name="design-brief"
+          data-netlify="true"
+          netlify-honeypot="bot-field"
+        >
+          <input type="hidden" name="form-name" value="design-brief" />
+          <p className="hidden">
+            <label>
+              Don&apos;t fill this out: <input name="bot-field" />
+            </label>
+          </p>
+
+          {status === 'success' ? (
+            <div className="flex h-full min-h-[320px] flex-col items-center justify-center rounded-2xl border border-gold/40 bg-panel-light p-10 text-center">
+              <span className="font-display text-2xl text-gold-bright">Brief received</span>
+              <p className="mt-3 max-w-sm text-sm text-ivory-dim">
+                Thanks — the studio will follow up on WhatsApp or email shortly. For anything
+                urgent, message directly below.
+              </p>
+              <a
+                href={whatsappLink(`Hi ${brand.name}, I just submitted a design brief.`)}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-6 rounded-full border border-gold px-6 py-3 text-sm text-gold-bright hover:bg-gold hover:text-ink"
+              >
+                Confirm on WhatsApp →
+              </a>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              <Field label="Your Full Name" required>
+                <input
+                  name="name"
+                  required
+                  value={fields.name}
+                  onChange={handleChange}
+                  placeholder="e.g. Alina Furtado"
+                  className="input"
+                />
+              </Field>
+
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                <Field label="Email Address">
+                  <input
+                    type="email"
+                    name="email"
+                    value={fields.email}
+                    onChange={handleChange}
+                    placeholder="name@domain.com"
+                    className="input"
+                  />
+                </Field>
+                <Field label="WhatsApp / Phone" required>
+                  <input
+                    name="phone"
+                    required
+                    value={fields.phone}
+                    onChange={handleChange}
+                    placeholder="+91 00000 00000"
+                    className="input"
+                  />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                <Field label="Category" required>
+                  <select name="category" required value={fields.category} onChange={handleChange} className="input">
+                    <option>Ring Design</option>
+                    <option>Pendant / Charm</option>
+                    <option>Earrings</option>
+                    <option>Bracelet / Bangle</option>
+                    <option>CAD Repair / Modification</option>
+                  </select>
+                </Field>
+                <Field label="Target Metal">
+                  <select name="metal" value={fields.metal} onChange={handleChange} className="input">
+                    <option>14K Gold</option>
+                    <option>18K Gold</option>
+                    <option>Sterling Silver</option>
+                    <option>Platinum</option>
+                  </select>
+                </Field>
+              </div>
+
+              <Field label="Project Details & Dimensions" required>
+                <textarea
+                  name="details"
+                  required
+                  value={fields.details}
+                  onChange={handleChange}
+                  rows={4}
+                  placeholder="Finger size, stone sizes (e.g. 2.0mm round), target weight, structural notes..."
+                  className="input resize-none"
+                />
+              </Field>
+
+              {status === 'error' && (
+                <p className="text-sm text-red-400">
+                  Something went wrong sending the brief — please try WhatsApp instead.
+                </p>
+              )}
+
+              <button
+                type="submit"
+                disabled={status === 'submitting'}
+                className="w-full rounded-full bg-gold px-7 py-3.5 text-sm font-medium tracking-wide text-ink transition-transform hover:scale-[1.01] hover:bg-gold-bright disabled:opacity-60"
+              >
+                {status === 'submitting' ? 'Sending…' : 'Send Design Brief →'}
+              </button>
+              <a
+                href={whatsappLink(`Hi ${brand.name}, I have a jewelry CAD inquiry.`)}
+                target="_blank"
+                rel="noreferrer"
+                className="block w-full rounded-full border border-ivory-dim/40 px-7 py-3.5 text-center text-sm text-ivory transition-colors hover:border-gold hover:text-gold-bright"
+              >
+                Direct WhatsApp Chat
+              </a>
+            </div>
+          )}
+        </form>
+      </div>
+    </section>
+  )
+}
+
+function Field({
+  label,
+  required,
+  children,
+}: {
+  label: string
+  required?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <label className="block">
+      <span className="mb-2 block text-xs tracking-[0.15em] text-ivory-dim">
+        {label.toUpperCase()} {required && <span className="text-gold">*</span>}
+      </span>
+      {children}
+    </label>
+  )
+}
+
+src/components/FAQ.tsx
+added
++45
+import { useState } from 'react'
+import { faqs } from '@/data/content'
+import { SectionHead } from '@/components/Services'
+
+export function FAQ() {
+  const [openIndex, setOpenIndex] = useState<number | null>(0)
+
+  return (
+    <section className="section-shell">
+      <SectionHead eyebrow="QUESTIONS" title="Frequently Asked" align="left" />
+
+      <div className="mt-10 divide-y divide-hairline/60 border-y border-hairline/60">
+        {faqs.map((item, i) => {
+          const isOpen = openIndex === i
+          return (
+            <div key={item.question}>
+              <button
+                onClick={() => setOpenIndex(isOpen ? null : i)}
+                className="flex w-full items-center justify-between gap-6 py-6 text-left"
+                aria-expanded={isOpen}
+              >
+                <span className="font-display text-lg text-ivory md:text-xl">{item.question}</span>
+                <span
+                  className={`shrink-0 font-display text-2xl text-gold transition-transform duration-300 ${
+                    isOpen ? 'rotate-45' : ''
+                  }`}
+                >
+                  +
+                </span>
+              </button>
+              <div
+                className="grid overflow-hidden transition-[grid-template-rows] duration-300 ease-out"
+                style={{ gridTemplateRows: isOpen ? '1fr' : '0fr' }}
+              >
+                <div className="overflow-hidden">
+                  <p className="pb-6 text-sm leading-relaxed text-ivory-dim md:text-base">{item.answer}</p>
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+src/components/Footer.tsx
+added
++68
+import { brand, whatsappLink } from '@/data/content'
+
+export function Footer() {
+  const year = new Date().getFullYear()
+
+  return (
+    <footer className="border-t border-hairline/60">
+      <div className="section-shell !py-14 grid grid-cols-1 gap-10 md:grid-cols-3">
+        <div>
+          <a href="#home" className="flex items-center gap-3">
+            <span className="flex h-10 w-10 items-center justify-center rounded-full border border-gold/60 font-display text-lg text-gold-bright">
+              {brand.mark}
+            </span>
+            <span className="flex flex-col leading-none">
+              <span className="font-display text-lg tracking-[0.08em] text-ivory">{brand.name.toUpperCase()}</span>
+              <span className="mt-1 text-[10px] tracking-[0.3em] text-ivory-dim">JEWELRY CAD DESIGN</span>
+            </span>
+          </a>
+          <p className="mt-5 max-w-xs text-sm leading-relaxed text-ivory-dim">
+            Production-ready jewelry CAD and 3D rendering, modeled to bench standard from{' '}
+            {brand.location}.
+          </p>
+        </div>
+
+        <div>
+          <h4 className="text-xs tracking-[0.25em] text-gold">NAVIGATE</h4>
+          <ul className="mt-4 space-y-2 text-sm text-ivory-dim">
+            <li><a href="#services" className="hover:text-gold-bright">Services</a></li>
+            <li><a href="#portfolio" className="hover:text-gold-bright">CAD Portfolio</a></li>
+            <li><a href="#workflow" className="hover:text-gold-bright">Workflow</a></li>
+            <li><a href="#order" className="hover:text-gold-bright">Get a Quote</a></li>
+          </ul>
+        </div>
+
+        <div>
+          <h4 className="text-xs tracking-[0.25em] text-gold">CONTACT</h4>
+          <ul className="mt-4 space-y-2 text-sm text-ivory-dim">
+            <li>
+              <a
+                href={whatsappLink(`Hi ${brand.name}, I want to discuss a jewelry CAD project.`)}
+                target="_blank"
+                rel="noreferrer"
+                className="hover:text-gold-bright"
+              >
+                WhatsApp — {brand.whatsappDisplay}
+              </a>
+            </li>
+            <li>
+              <a
+                href={`https://instagram.com/${brand.instagram.replace('@', '')}`}
+                target="_blank"
+                rel="noreferrer"
+                className="hover:text-gold-bright"
+              >
+                Instagram — {brand.instagram}
+              </a>
+            </li>
+            <li>{brand.location}</li>
+          </ul>
+        </div>
+      </div>
+
+      <div className="border-t border-hairline/60 py-6 text-center text-xs tracking-wide text-ivory-dim/70">
+        © {year} {brand.name}. All rights reserved.
+      </div>
+    </footer>
+  )
+}
+
+src/components/Header.tsx
+added
++87
+import { useState } from 'react'
+import { brand, whatsappLink } from '@/data/content'
+
+const links = [
+  { href: '#services', label: 'Services' },
+  { href: '#portfolio', label: 'CAD Portfolio' },
+  { href: '#workflow', label: 'Workflow' },
+  { href: '#about', label: 'About' },
+]
+
+export function Header() {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <header className="fixed inset-x-0 top-0 z-50 border-b border-hairline/60 bg-ink/85 backdrop-blur-md">
+      <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4 md:px-10">
+        <a href="#home" className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-full border border-gold/60 font-display text-lg text-gold-bright">
+            {brand.mark}
+          </span>
+          <span className="flex flex-col leading-none">
+            <span className="font-display text-lg tracking-[0.08em] text-ivory">{brand.name.toUpperCase()}</span>
+            <span className="mt-1 text-[10px] tracking-[0.3em] text-ivory-dim">JEWELRY CAD DESIGN</span>
+          </span>
+        </a>
+
+        <nav className="hidden items-center gap-9 md:flex">
+          {links.map((link) => (
+            <a
+              key={link.href}
+              href={link.href}
+              className="text-sm tracking-wide text-ivory-dim transition-colors hover:text-gold-bright"
+            >
+              {link.label}
+            </a>
+          ))}
+          <a
+            href="#order"
+            className="rounded-full border border-gold bg-gold/10 px-5 py-2 text-sm tracking-wide text-gold-bright transition-colors hover:bg-gold hover:text-ink"
+          >
+            Get a Quote
+          </a>
+        </nav>
+
+        <button
+          aria-label="Toggle menu"
+          onClick={() => setOpen((v) => !v)}
+          className="flex h-10 w-10 flex-col items-center justify-center gap-1.5 md:hidden"
+        >
+          <span className={`h-px w-6 bg-ivory transition-transform ${open ? 'translate-y-2 rotate-45' : ''}`} />
+          <span className={`h-px w-6 bg-ivory transition-opacity ${open ? 'opacity-0' : ''}`} />
+          <span className={`h-px w-6 bg-ivory transition-transform ${open ? '-translate-y-2 -rotate-45' : ''}`} />
+        </button>
+      </div>
+
+      {open && (
+        <nav className="flex flex-col gap-1 border-t border-hairline/60 bg-ink px-6 pb-6 pt-2 md:hidden">
+          {links.map((link) => (
+            <a
+              key={link.href}
+              href={link.href}
+              onClick={() => setOpen(false)}
+              className="rounded-lg px-2 py-3 text-sm text-ivory-dim hover:bg-panel hover:text-gold-bright"
+            >
+              {link.label}
+            </a>
+          ))}
+          <a
+            href="#order"
+            onClick={() => setOpen(false)}
+            className="mt-2 rounded-full border border-gold bg-gold/10 px-5 py-3 text-center text-sm text-gold-bright"
+          >
+            Get a Quote
+          </a>
+          <a
+            href={whatsappLink(`Hi ${brand.name}, I'd like to discuss a jewelry CAD project.`)}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1 rounded-full px-5 py-3 text-center text-sm text-ivory-dim"
+          >
+            WhatsApp Us
+          </a>
+        </nav>
+      )}
+    </header>
+  )
+}
+
+src/components/Hero.tsx
+added
++58
+import { brand, trustBadges, whatsappLink } from '@/data/content'
+
+export function Hero() {
+  return (
+    <section id="home" className="relative flex min-h-[100svh] items-center overflow-hidden pt-28">
+      <div className="absolute inset-0">
+        <img
+          src="/.netlify/images?url=/img/hero-ring.png&w=1800&fm=webp&q=82"
+          alt=""
+          className="h-full w-full object-cover object-[65%_45%] opacity-70"
+        />
+        <div className="absolute inset-0 bg-gradient-to-r from-ink via-ink/85 to-ink/20" />
+        <div className="absolute inset-0 bg-gradient-to-t from-ink via-transparent to-ink/40" />
+      </div>
+
+      <div className="relative mx-auto max-w-7xl px-6 md:px-10">
+        <div className="max-w-2xl animate-fade-up">
+          <p className="mb-5 text-xs tracking-[0.35em] text-gold">PRECISION 3D MODELING &amp; CAD SERVICES</p>
+          <h1 className="font-display text-5xl leading-[1.05] text-ivory md:text-7xl">
+            High-End Custom
+            <br />
+            <span className="text-shimmer italic">Jewelry CAD Design</span>
+          </h1>
+          <p className="mt-7 max-w-xl text-base leading-relaxed text-ivory-dim md:text-lg">
+            Sketches, reference photos, and rough concepts become production-ready 3D STL and 3DM
+            models — engineered to bench standard for jewelers and manufacturers worldwide.
+          </p>
+
+          <div className="mt-10 flex flex-wrap items-center gap-4">
+            <a
+              href="#order"
+              className="rounded-full bg-gold px-7 py-3.5 text-sm font-medium tracking-wide text-ink transition-transform hover:scale-[1.03] hover:bg-gold-bright"
+            >
+              Submit Your Design Brief →
+            </a>
+            <a
+              href={whatsappLink(`Hi ${brand.name}, I want to discuss a jewelry CAD project.`)}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-full border border-ivory-dim/40 px-7 py-3.5 text-sm tracking-wide text-ivory transition-colors hover:border-gold hover:text-gold-bright"
+            >
+              WhatsApp Us
+            </a>
+          </div>
+
+          <div className="mt-14 grid grid-cols-3 gap-6 border-t border-hairline/70 pt-8">
+            {trustBadges.map((badge) => (
+              <div key={badge.label}>
+                <div className="font-display text-xl text-gold-bright md:text-2xl">{badge.value}</div>
+                <div className="mt-1 text-xs tracking-wide text-ivory-dim">{badge.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+src/components/Portfolio.tsx
+added
++38
+import { portfolio } from '@/data/content'
+import { SectionHead } from '@/components/Services'
+
+export function Portfolio() {
+  return (
+    <section id="portfolio" className="section-shell">
+      <SectionHead
+        eyebrow="STUDIO SHOWCASE"
+        title="Featured 3D CAD Projects"
+        description="A sample of models engineered for casting, printing, and stone setting."
+      />
+
+      <div className="mt-14 grid grid-cols-1 gap-6 sm:grid-cols-2">
+        {portfolio.map((item, i) => (
+          <div
+            key={item.key}
+            className={`group relative overflow-hidden rounded-2xl border border-hairline/60 ${
+              i % 3 === 0 ? 'sm:col-span-2' : ''
+            }`}
+          >
+            <div className={`relative ${i % 3 === 0 ? 'aspect-[21/9]' : 'aspect-[4/3]'}`}>
+              <img
+                src={`/.netlify/images?url=${item.image}&w=1200&fm=webp&q=80`}
+                alt={item.title}
+                className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-105"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-ink via-ink/10 to-transparent" />
+            </div>
+            <div className="absolute inset-x-0 bottom-0 p-6">
+              <h3 className="font-display text-xl text-ivory">{item.title}</h3>
+              <p className="mt-1 text-xs tracking-wide text-gold-bright">{item.meta}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+src/components/Services.tsx
+added
++54
+import { services } from '@/data/content'
+
+export function Services() {
+  return (
+    <section id="services" className="section-shell">
+      <SectionHead
+        eyebrow="OUR EXPERTISE"
+        title="Professional CAD Modeling Services"
+        description="Engineered precisely to bench jewelry standards — accounting for metal shrinkage, stone-setting tolerances, channel depths, and exact weight targets."
+      />
+
+      <div className="mt-14 grid grid-cols-1 gap-px overflow-hidden rounded-2xl bg-hairline/60 sm:grid-cols-2 lg:grid-cols-3">
+        {services.map((service, i) => (
+          <article
+            key={service.title}
+            className="group relative bg-panel p-8 transition-colors hover:bg-panel-light"
+          >
+            <span className="font-display text-3xl text-gold-deep transition-colors group-hover:text-gold">
+              {String(i + 1).padStart(2, '0')}
+            </span>
+            <h3 className="mt-5 font-display text-xl text-ivory">{service.title}</h3>
+            <p className="mt-3 text-sm leading-relaxed text-ivory-dim">{service.description}</p>
+            <a
+              href="#order"
+              className="mt-6 inline-block text-xs tracking-[0.2em] text-gold transition-colors group-hover:text-gold-bright"
+            >
+              ORDER CAD →
+            </a>
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+export function SectionHead({
+  eyebrow,
+  title,
+  description,
+  align = 'center',
+}: {
+  eyebrow: string
+  title: string
+  description?: string
+  align?: 'center' | 'left'
+}) {
+  return (
+    <div className={align === 'center' ? 'mx-auto max-w-2xl text-center' : 'max-w-2xl'}>
+      <p className="text-xs tracking-[0.35em] text-gold">{eyebrow}</p>
+      <h2 className="mt-4 font-display text-3xl text-ivory md:text-4xl">{title}</h2>
+      {description && <p className="mt-4 text-sm leading-relaxed text-ivory-dim md:text-base">{description}</p>}
+    </div>
+  )
+}
+
+src/components/Testimonials.tsx
+added
++28
+import { testimonials } from '@/data/content'
+import { SectionHead } from '@/components/Services'
+
+export function Testimonials() {
+  return (
+    <section className="section-shell">
+      <SectionHead eyebrow="CLIENT NOTES" title="What Jewelers Are Saying" />
+
+      <div className="mt-14 grid grid-cols-1 gap-6 md:grid-cols-2">
+        {testimonials.map((t) => (
+          <figure
+            key={t.name}
+            className="rounded-2xl border border-hairline/60 bg-panel p-8"
+          >
+            <span className="font-display text-4xl text-gold-deep">&ldquo;</span>
+            <blockquote className="-mt-4 text-sm leading-relaxed text-ivory-dim md:text-base">
+              {t.quote}
+            </blockquote>
+            <figcaption className="mt-6 border-t border-hairline/70 pt-4">
+              <span className="block font-display text-base text-ivory">{t.name}</span>
+              <span className="text-xs tracking-wide text-gold">{t.role}</span>
+            </figcaption>
+          </figure>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+src/components/Workflow.tsx
+added
++25
+import { workflow } from '@/data/content'
+import { SectionHead } from '@/components/Services'
+
+export function Workflow() {
+  return (
+    <section id="workflow" className="section-shell">
+      <SectionHead
+        eyebrow="PRODUCTION PROCESS"
+        title="How We Work With You"
+        description="A simple four-step workflow to turn your concept into a print-ready model."
+      />
+
+      <div className="relative mt-16 grid grid-cols-1 gap-10 md:grid-cols-4">
+        <div className="absolute left-0 right-0 top-6 hidden h-px bg-hairline/60 md:block" />
+        {workflow.map((step) => (
+          <div key={step.num} className="relative">
+            <div className="font-display text-4xl text-gold-deep">{step.num}</div>
+            <h3 className="mt-4 font-display text-lg text-ivory">{step.title}</h3>
+            <p className="mt-3 text-sm leading-relaxed text-ivory-dim">{step.description}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+src/data/content.ts
+added
++157
+export const brand = {
+  name: 'SJ Studio',
+  mark: 'SJ',
+  legalName: 'SJ Studio Jewelry CAD Design',
+  founder: 'Sanjay Joshi',
+  location: 'Mumbai, Maharashtra',
+  whatsapp: '919775247668',
+  whatsappDisplay: '+91 97752 47668',
+  instagram: '@sjstudio.cad',
+}
+
+export const whatsappLink = (message: string) =>
+  `https://wa.me/${brand.whatsapp}?text=${encodeURIComponent(message)}`
+
+export const trustBadges = [
+  { value: '100%', label: 'Print & cast ready' },
+  { value: 'Rhino / Matrix', label: 'Editable source files' },
+  { value: '24–48 hr', label: 'Standard turnaround' },
+]
+
+export const services = [
+  {
+    title: 'Custom Ring CAD',
+    description:
+      'Solitaires, halo settings, and filigree work built to exact finger sizes and gemstone dimensions, with prong geometry checked for casting yield.',
+  },
+  {
+    title: 'Pendants & Bails',
+    description:
+      'Custom pendants, letter charms, and iced-out pieces with bails engineered to sit correctly on Cuban and tennis chains.',
+  },
+  {
+    title: 'Advanced Stone Setting',
+    description:
+      'Micropavé, channel, bezel, and baguette layouts delivered with an exact stone count and carat-weight map for your setter.',
+  },
+  {
+    title: 'Earrings & Bangles',
+    description:
+      'Drop earrings, studs, and hinged bangles with locking mechanisms modeled for casting balance and everyday wear.',
+  },
+  {
+    title: 'CAD Repair & Resizing',
+    description:
+      'Non-manifold STL geometry fixed, finger sizes adjusted, and wall thickness corrected on files from other studios.',
+  },
+  {
+    title: '3D Renders & Turntables',
+    description:
+      'Photoreal studio renders and 360° turntable animation for storefronts, catalogs, and client pre-approvals.',
+  },
+]
+
+export const portfolio = [
+  {
+    key: 'ring',
+    image: '/img/portfolio-ring.png',
+    title: 'Engagement Solitaire & Halo',
+    meta: 'Production STL · MatrixGold · Diamond layout map',
+  },
+  {
+    key: 'pendant',
+    image: '/img/portfolio-pendant.png',
+    title: 'Sculpted Pavé Pendant',
+    meta: 'Heavy bail · Pavé diamond layout · 3DM source file',
+  },
+  {
+    key: 'earrings',
+    image: '/img/portfolio-earrings.png',
+    title: 'Geometric Diamond Drops',
+    meta: '3D print ready · Lightened backing structure',
+  },
+  {
+    key: 'bracelet',
+    image: '/img/portfolio-bracelet.png',
+    title: 'Cuban Link Tennis Bracelet',
+    meta: 'Interlocking links · Custom box clasp',
+  },
+]
+
+export const workflow = [
+  {
+    num: '01',
+    title: 'Submit Your Brief',
+    description: 'Send a sketch, reference photos, finger size, and gemstone specifications through the form below.',
+  },
+  {
+    num: '02',
+    title: '3D CAD Modeling',
+    description: 'The geometry is built in Rhino or MatrixGold to bench standards, with wall thickness tuned for your metal.',
+  },
+  {
+    num: '03',
+    title: 'Render & Revise',
+    description: 'You review photoreal renders and request adjustments before anything goes to production.',
+  },
+  {
+    num: '04',
+    title: 'Final File Delivery',
+    description: 'Receive print-ready STL, editable 3DM, and a weight spec sheet for your caster.',
+  },
+]
+
+export const testimonials = [
+  {
+    quote:
+      'The prong geometry on our halo rings finally casts clean on the first pour. That alone cut our rework rate by a third.',
+    name: 'Priya Ramanathan',
+    role: 'Retail Jeweler, Chennai',
+  },
+  {
+    quote:
+      'Sent over a phone photo of a pendant my client sketched on a napkin. Got back a production-ready 3DM in two days, exact bail placement and all.',
+    name: 'Marcus Delaine',
+    role: 'Independent Designer, Antwerp',
+  },
+  {
+    quote:
+      'The lightweight construction on a bangle order shaved almost 4 grams off the gold without anyone noticing a difference in hand.',
+    name: 'Farah Osei',
+    role: 'Manufacturer, London',
+  },
+  {
+    quote:
+      'The turntable render sold the piece before we ever cast it. Client approved from the video alone.',
+    name: 'Daniel Whitcombe',
+    role: 'Store Owner, Toronto',
+  },
+]
+
+export const faqs = [
+  {
+    question: 'What file formats do I receive?',
+    answer:
+      'Every order ships with a print-ready STL and the editable 3DM source file (Rhino or MatrixGold), plus a weight and stone-count spec sheet.',
+  },
+  {
+    question: 'How long does a standard project take?',
+    answer:
+      'Most single-piece CAD projects — rings, pendants, earrings — turn around in 24 to 48 hours. Complex sculptural or multi-stone pieces are quoted individually.',
+  },
+  {
+    question: 'Can you work from a rough sketch or photo?',
+    answer:
+      'Yes. Send whatever you have — a napkin sketch, a competitor photo, or a verbal description — along with finger size and stone dimensions, and it gets modeled to bench standard.',
+  },
+  {
+    question: 'Do you fix CAD files from other designers?',
+    answer:
+      'Yes — non-manifold geometry, wall thickness issues, and resizing on external STL or 3DM files are handled as CAD repair jobs.',
+  },
+  {
+    question: 'How do revisions work?',
+    answer:
+      'After the first render, you get a round of adjustments included before final files are delivered — change stone sizes, band width, or bail placement as needed.',
+  },
+]
+
+src/routeTree.gen.ts
+added
++68
+/* eslint-disable */
+
+// @ts-nocheck
+
+// noinspection JSUnusedGlobalSymbols
+
+// This file was automatically generated by TanStack Router.
+// You should NOT make any changes in this file as it will be overwritten.
+// Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
+
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as IndexRouteImport } from './routes/index'
+
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+
+export interface FileRoutesByFullPath {
+  '/': typeof IndexRoute
+}
+export interface FileRoutesByTo {
+  '/': typeof IndexRoute
+}
+export interface FileRoutesById {
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+}
+export interface FileRouteTypes {
+  fileRoutesByFullPath: FileRoutesByFullPath
+  fullPaths: '/'
+  fileRoutesByTo: FileRoutesByTo
+  to: '/'
+  id: '__root__' | '/'
+  fileRoutesById: FileRoutesById
+}
+export interface RootRouteChildren {
+  IndexRoute: typeof IndexRoute
+}
+
+declare module '@tanstack/react-router' {
+  interface FileRoutesByPath {
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+  }
+}
+
+const rootRouteChildren: RootRouteChildren = {
+  IndexRoute: IndexRoute,
+}
+export const routeTree = rootRouteImport
+  ._addFileChildren(rootRouteChildren)
+  ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { createStart } from '@tanstack/react-start'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+  }
+}
+
+src/router.tsx
+added
++15
+import { createRouter } from '@tanstack/react-router'
+
+// Import the generated route tree
+import { routeTree } from './routeTree.gen'
+
+// Create a new router instance
+export const getRouter = () => {
+  const router = createRouter({
+    routeTree,
+    scrollRestoration: true,
+    defaultPreloadStaleTime: 0,
+  })
+
+  return router
+}
+
+src/routes/__root.tsx
+added
++68
+import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
+
+import '../styles.css'
+
+const siteName = 'SJ Studio | Jewelry CAD Design & 3D Modeling'
+const siteDescription =
+  'SJ Studio crafts production-ready jewelry CAD — custom rings, pendants, and earrings modeled in Rhino and MatrixGold, delivered as print-ready STL and editable 3DM files within 24–48 hours.'
+
+export const Route = createRootRoute({
+  head: () => ({
+    meta: [
+      {
+        charSet: 'utf-8',
+      },
+      {
+        name: 'viewport',
+        content: 'width=device-width, initial-scale=1',
+      },
+      {
+        title: siteName,
+      },
+      {
+        name: 'description',
+        content: siteDescription,
+      },
+      {
+        property: 'og:title',
+        content: siteName,
+      },
+      {
+        property: 'og:description',
+        content: siteDescription,
+      },
+      {
+        property: 'og:type',
+        content: 'website',
+      },
+      {
+        name: 'twitter:card',
+        content: 'summary_large_image',
+      },
+    ],
+    links: [
+      { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+      { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossOrigin: 'anonymous' },
+      {
+        rel: 'stylesheet',
+        href: 'https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,wght@0,400..900;1,400..900&family=Manrope:wght@300;400;500;600;700;800&display=swap',
+      },
+    ],
+  }),
+  shellComponent: RootDocument,
+})
+
+function RootDocument({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <head>
+        <HeadContent />
+      </head>
+      <body>
+        <div className="grain-overlay" />
+        {children}
+        <Scripts />
+      </body>
+    </html>
+  )
+}
+
+src/routes/index.tsx
+added
++34
+import { createFileRoute } from '@tanstack/react-router'
+import { Header } from '@/components/Header'
+import { Hero } from '@/components/Hero'
+import { Services } from '@/components/Services'
+import { Portfolio } from '@/components/Portfolio'
+import { Workflow } from '@/components/Workflow'
+import { About } from '@/components/About'
+import { Testimonials } from '@/components/Testimonials'
+import { FAQ } from '@/components/FAQ'
+import { ContactForm } from '@/components/ContactForm'
+import { Footer } from '@/components/Footer'
+
+export const Route = createFileRoute('/')({
+  component: Home,
+})
+
+function Home() {
+  return (
+    <>
+      <Header />
+      <main>
+        <Hero />
+        <Services />
+        <Portfolio />
+        <Workflow />
+        <About />
+        <Testimonials />
+        <FAQ />
+        <ContactForm />
+      </main>
+      <Footer />
+    </>
+  )
+}
+
+src/styles.css
+added
++111
+@import "tailwindcss" source("../");
+
+@theme {
+  --color-ink: #0c0a08;
+  --color-panel: #16130f;
+  --color-panel-light: #1e1a14;
+  --color-hairline: #3a3226;
+  --color-ivory: #f3ecdf;
+  --color-ivory-dim: #cfc4ae;
+  --color-gold: #c6a15b;
+  --color-gold-bright: #e4c688;
+  --color-gold-deep: #8a6a30;
+
+  --font-display: "Bodoni Moda", "Times New Roman", serif;
+  --font-body: "Manrope", system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink);
+  color: var(--color-ivory);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-gold);
+  color: var(--color-ink);
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.text-shimmer {
+  background: linear-gradient(110deg, var(--color-gold-deep) 10%, var(--color-gold-bright) 35%, var(--color-gold) 55%, var(--color-gold-deep) 80%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes grain-shift {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(-2%, -1%); }
+}
+
+.grain-overlay {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  animation: grain-shift 1.2s steps(2) infinite;
+}
+
+code {
+  font-family: Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+.section-shell {
+  max-width: 80rem;
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+  padding-block: 5rem;
+}
+
+@media (min-width: 768px) {
+  .section-shell {
+    padding-inline: 2.5rem;
+    padding-block: 7rem;
+  }
+}
+
+.input {
+  width: 100%;
+  border-radius: 0.75rem;
+  border: 1px solid var(--color-hairline);
+  background: var(--color-panel-light);
+  color: var(--color-ivory);
+  padding: 0.75rem 1rem;
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.input::placeholder {
+  color: var(--color-ivory-dim);
+  opacity: 0.55;
+}
+
+.input:focus {
+  border-color: var(--color-gold);
+}
+
+tsconfig.json
+added
++28
+{
+  "include": ["**/*.ts", "**/*.tsx"],
+  "compilerOptions": {
+    "target": "ES2022",
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "noEmit": true,
+
+    /* Linting */
+    "skipLibCheck": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}
+
+vite.config.ts
+added
++20
+import { defineConfig } from 'vite'
+import { tanstackStart } from '@tanstack/react-start/plugin/vite'
+import viteReact from '@vitejs/plugin-react'
+import viteTsConfigPaths from 'vite-tsconfig-paths'
+import tailwindcss from '@tailwindcss/vite'
+import netlify from '@netlify/vite-plugin-tanstack-start'
+
+const config = defineConfig({
+  plugins: [
+    viteTsConfigPaths({
+      projects: ['./tsconfig.json'],
+    }),
+    tailwindcss(),
+    netlify(),
+    tanstackStart(),
+    viteReact(),
+  ],
+})
+
+export default config
